@@ -2,6 +2,8 @@ import os
 import sys
 import time
 import requests
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -26,6 +28,18 @@ def get_store_id():
 def get_check_interval():
     """Get check interval in seconds from environment variable"""
     return int(os.getenv("CHECK_INTERVAL", "300"))
+
+def get_in_stock_interval():
+    """Get interval when item is in stock (default 1 hour)"""
+    return int(os.getenv("IN_STOCK_INTERVAL", "3600"))
+
+def get_daily_report_hour():
+    """Get hour for daily status report (24h format, default 9 = 9am)"""
+    return int(os.getenv("DAILY_REPORT_HOUR", "9"))
+
+def get_timezone():
+    """Get timezone for daily report (default EST)"""
+    return os.getenv("TIMEZONE", "America/New_York")
 
 def send_gotify(title, message):
     try:
@@ -72,7 +86,7 @@ def set_store_cookie(driver, product_url):
     # Wait for the page to load, adjust as needed (seconds)
     time.sleep(0)
 
-def check_stock(driver, product_url):
+def check_stock(driver, product_url, notified_urls):
     # Set the store cookie
     set_store_cookie(driver, product_url)
 
@@ -84,21 +98,63 @@ def check_stock(driver, product_url):
 
     # Search for 'inStock': 'True' in the page source
     if "'inStock':'True'" in page_source:
-        print(f"In Stock: {product_name}")
-        send_gotify("Microcenter Stock Alert!", f"{product_name} is now IN STOCK!\n\n{product_url}")
+        if product_url not in notified_urls:
+            print(f"In Stock: {product_name} (NEW!)")
+            send_gotify("Microcenter Stock Alert!", f"{product_name} is now IN STOCK!\n\n{product_url}")
+            notified_urls.add(product_url)
+        else:
+            print(f"In Stock: {product_name} (already notified)")
         return True
     else:
+        # Remove from notified set so we can notify again if it comes back
+        notified_urls.discard(product_url)
         print(f"Out of Stock: {product_name}")
         return False
+
+def send_daily_report(stock_status):
+    """Send daily status report of all monitored items"""
+    tz = ZoneInfo(get_timezone())
+    now = datetime.now(tz)
+
+    lines = [f"Daily Status Report - {now.strftime('%Y-%m-%d %I:%M %p %Z')}\n"]
+
+    in_stock_count = sum(1 for s in stock_status.values() if s)
+    out_of_stock_count = len(stock_status) - in_stock_count
+
+    lines.append(f"In Stock: {in_stock_count} | Out of Stock: {out_of_stock_count}\n")
+
+    for url, is_in_stock in stock_status.items():
+        product_name = url.split("/")[-1].replace("-", " ").title()
+        status = "IN STOCK" if is_in_stock else "Out of Stock"
+        lines.append(f"- {product_name}: {status}")
+
+    message = "\n".join(lines)
+    send_gotify("StockSmart Daily Report", message)
 
 def main():
     product_urls = get_product_urls()
     check_interval = get_check_interval()
+    in_stock_interval = get_in_stock_interval()
+    daily_report_hour = get_daily_report_hour()
+    tz = ZoneInfo(get_timezone())
+
+    # Track URLs we've already notified about (to avoid spam)
+    notified_urls = set()
+
+    # Track last daily report date
+    last_report_date = None
+
+    # Track current stock status for daily report
+    stock_status = {}
 
     print(f"Starting stock checker...")
     print(f"Store ID: {get_store_id()}")
     print(f"Check interval: {check_interval} seconds")
+    print(f"In-stock interval: {in_stock_interval} seconds")
+    print(f"Daily report: {daily_report_hour}:00 ({get_timezone()})")
     print(f"Monitoring {len(product_urls)} product(s)")
+    for url in product_urls:
+        print(f"  - {url}")
 
     while True:
         # Set up Chrome options to enable headless mode
@@ -112,18 +168,27 @@ def main():
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
         # Check stock for each product URL
-        found_in_stock = False
+        any_in_stock = False
         for product_url in product_urls:
-            if check_stock(driver, product_url):
-                found_in_stock = True
+            is_in_stock = check_stock(driver, product_url, notified_urls)
+            stock_status[product_url] = is_in_stock
+            if is_in_stock:
+                any_in_stock = True
 
         driver.quit()
 
-        if found_in_stock:
-            print("Item(s) found in stock! Exiting...")
-            sys.exit()
+        # Check if it's time for daily report
+        now = datetime.now(tz)
+        today = now.date()
+        if now.hour >= daily_report_hour and last_report_date != today:
+            print("Sending daily status report...")
+            send_daily_report(stock_status)
+            last_report_date = today
 
-        time.sleep(check_interval)
+        # Use longer interval if any item is in stock
+        sleep_time = in_stock_interval if any_in_stock else check_interval
+        print(f"Sleeping {sleep_time} seconds...")
+        time.sleep(sleep_time)
 
 if __name__ == "__main__":
     main()
