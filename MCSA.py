@@ -1,155 +1,129 @@
 import os
 import sys
 import time
-import smtplib
+import requests
 from dotenv import load_dotenv
 from selenium import webdriver
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 
-def set_store_cookie(driver):
+# Load environment variables (works for both local dev and Docker)
+load_dotenv()
+
+def get_product_urls():
+    """Get product URLs from environment variable (comma-separated)"""
+    urls = os.getenv("PRODUCT_URLS", "")
+    if not urls:
+        print("ERROR: No PRODUCT_URLS configured in environment")
+        sys.exit(1)
+    return [url.strip() for url in urls.split(",") if url.strip()]
+
+def get_store_id():
+    """Get Microcenter store ID from environment variable"""
+    return os.getenv("STORE_ID", "051")
+
+def get_check_interval():
+    """Get check interval in seconds from environment variable"""
+    return int(os.getenv("CHECK_INTERVAL", "300"))
+
+def send_gotify(title, message):
+    try:
+        gotify_url = os.getenv("GOTIFY_URL")
+        gotify_token = os.getenv("GOTIFY_TOKEN")
+
+        if not gotify_url or not gotify_token:
+            print("Gotify not configured, skipping notification")
+            return
+
+        response = requests.post(
+            f"{gotify_url}/message",
+            params={"token": gotify_token},
+            json={
+                "title": title,
+                "message": message,
+                "priority": 8
+            }
+        )
+        response.raise_for_status()
+        print("Gotify notification sent!")
+    except Exception as e:
+        print(f"Failed to send Gotify notification: {e}")
+
+def set_store_cookie(driver, product_url):
     # Get the main store page URL so you don't overload the product webpage. Selenium limitation
     driver.get("https://www.microcenter.com")
 
     # Wait for the page to load, adjust as needed (seconds)
     time.sleep(0)
 
-    # Set the storeSelected cookie. Default: 131 (Dallas store)
+    # Set the storeSelected cookie
     driver.add_cookie({
         'name': 'storeSelected',
-        'value': '131',
+        'value': get_store_id(),
         'domain': '.microcenter.com',
         'path': '/',
         'secure': True,
         'httpOnly': False
     })
     # Get the product page URL
-    driver.get("https://www.microcenter.com/product/687907/amd-ryzen-7-9800x3d-granite-ridge-am5-470ghz-8-core-boxed-processor-heatsink-not-included")
+    driver.get(product_url)
 
     # Wait for the page to load, adjust as needed (seconds)
     time.sleep(0)
 
-def prompt():
-    # Prompts the user for email and password securely
-    print("Security Disclaimer:\n"
-          "Your personal information can only be accessed by a system administrator while the program is running.\n"
-          "This information cannot be accessed by outside users and is immediately deleted upon the end of program runtime.\n"
-          "This means that you will have to re-enter your information every time the program is ran.\n"
-          "\n"
-          "Email Information Instructions:\n"
-          "Go to myaccount.google.com, search 'App Passwords', and click the respective option.\n"
-          "In the 'App name' field enter any title specific to this program.\n"
-          "Copy and paste the newly generated password into the appropriate field below:")
-
-    # Set the environment variables
-    os.environ["email"] = input("Enter your email: ")
-    os.environ["password"] = input("Enter your password: ")
-
-def test_email():
-    # Send the test email
-    try:
-        # Get the environment variables
-        email_user = os.getenv("email")
-        email_password = os.getenv("password")
-
-        # Confirm whether email credentials were entered
-        if not email_user or not email_password:
-            raise Exception("Test email credentials not found")
-
-        # Set up the email
-        msg = MIMEMultipart()
-        msg['From'] = email_user
-        msg['To'] = email_user
-        msg['Subject'] = 'Test Email Successful'
-        msg.attach(MIMEText('This is a test email to confirm that your email login is correctly working alongside SMTP within the Microcenter Stock Python Application.\n\n'
-                            'You may now let the application run in the background while it actively checks stock of your selected Microcenter product.','plain'))
-
-        # Connect to the email server and send the email
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(email_user, email_password)
-            server.sendmail(email_user, email_user, msg.as_string())
-
-        print("Test email sent successfully!")
-
-    # Test email exception
-    except Exception as e:
-        print(f"Failed to send test email: {e}")
-        print("Application will continue without user email")
-
-def send_email():
-    try:
-        # Get the environment variables
-        email_user = os.getenv("email")
-        email_password = os.getenv("password")
-
-        # Confirm whether email credentials were entered
-        if not email_user or not email_password:
-            raise Exception("Email credentials not found")
-
-        # Set up the email
-        msg = MIMEMultipart()
-        msg['From'] = email_user
-        msg['To'] = email_user
-        msg['Subject'] = 'Your Microcenter Product is Now In Stock'
-        msg.attach(MIMEText('Your product is in stock. Reserve it online or head to the store to get it while supplies last.','plain'))
-
-        # Connect to the email server and send the email
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(email_user, email_password)
-            server.sendmail(email_user, email_user, msg.as_string())
-
-        print("Email sent successfully!")
-
-    # Test email exception
-    except Exception as e:
-        print(f"Failed to send email: {e}")
-
-def check_stock(driver):
-    # Set the store cookie to Dallas (storeSelected: 131)
-    set_store_cookie(driver)
+def check_stock(driver, product_url):
+    # Set the store cookie
+    set_store_cookie(driver, product_url)
 
     # Get the page source (HTML)
     page_source = driver.page_source
 
-    # Search for 'inStock': 'False' in the page source
+    # Extract product name from URL for notifications
+    product_name = product_url.split("/")[-1].replace("-", " ").title()
+
+    # Search for 'inStock': 'True' in the page source
     if "'inStock':'True'" in page_source:
-        print("In Stock!")
-        send_email()
-        driver.quit()  # Close the browser
-        sys.exit()
+        print(f"In Stock: {product_name}")
+        send_gotify("Microcenter Stock Alert!", f"{product_name} is now IN STOCK!\n\n{product_url}")
+        return True
     else:
-        print("Out of Stock!")
+        print(f"Out of Stock: {product_name}")
+        return False
 
 def main():
-    # Enter email and password
-    prompt()
+    product_urls = get_product_urls()
+    check_interval = get_check_interval()
 
-    # Specify the config.env path
-    config_path = ".venv/config.env"
-
-    # Load email credentials from the config.env file
-    load_dotenv(config_path)
-
-    # Test email
-    test_email()
+    print(f"Starting stock checker...")
+    print(f"Store ID: {get_store_id()}")
+    print(f"Check interval: {check_interval} seconds")
+    print(f"Monitoring {len(product_urls)} product(s)")
 
     while True:
         # Set up Chrome options to enable headless mode
         chrome_options = Options()
-        chrome_options.add_argument("--headless")  # Enable headless mode
-        chrome_options.add_argument("--disable-gpu")  # Disable GPU acceleration
-        chrome_options.add_argument("--no-sandbox")  # Fix potential environment issues
+        chrome_options.add_argument("--headless")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
 
         # Set up the WebDriver with the specified options
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
 
-        # Call the function to check stock
-        check_stock(driver)  # Check stock status once
-        time.sleep(300) # Change the number to check stock sooner/faster (seconds). Default: checks stock every ~5 minutes
+        # Check stock for each product URL
+        found_in_stock = False
+        for product_url in product_urls:
+            if check_stock(driver, product_url):
+                found_in_stock = True
 
-main()
+        driver.quit()
+
+        if found_in_stock:
+            print("Item(s) found in stock! Exiting...")
+            sys.exit()
+
+        time.sleep(check_interval)
+
+if __name__ == "__main__":
+    main()

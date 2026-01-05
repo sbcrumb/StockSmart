@@ -1,0 +1,8 @@
+services:
+  stocksmart:
+    build: .
+    container_name: stocksmart
+    restart: unless-stopped
+    env_file:
+      - .env
+    shm_size: '2gb'
